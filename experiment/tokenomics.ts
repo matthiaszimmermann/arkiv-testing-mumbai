@@ -17,7 +17,8 @@
 // Settings come from the environment; bun reads .env, which git ignores (see .env.example):
 //
 // - ARKIV_RPC_URL and ARKIV_CHAIN_ID: the chain, required. The run stops if the RPC serves
-//   another chain id.
+//   another chain id. ARKIV_RPC_ACCESS_KEY, optional, is appended to the URL as its last path
+//   segment; it never shows on screen or in the log.
 // - ARKIV_KEYSTORE: the sender's encrypted keystore file, required, made with
 //   experiment/new-wallet.ts. The run asks for its password on the terminal and keeps the key in
 //   memory only. The publicly known dev keys are refused.
@@ -53,7 +54,7 @@ import {
 } from "@arkiv-network/sdk-next"
 import { appendFileSync, existsSync, mkdirSync } from "node:fs"
 import { resolve } from "node:path"
-import { ContractFunctionRevertedError, defineChain, http, toHex, type Hex } from "viem"
+import { ContractFunctionRevertedError, defineChain, http, HttpRequestError, toHex, type Hex } from "viem"
 import { mnemonicToAccount, privateKeyToAccount } from "viem/accounts"
 import { unlock } from "./keystore"
 
@@ -62,16 +63,35 @@ import { unlock } from "./keystore"
 // the settings are checked, so a run refused for them leaves none.
 const RESULTS = resolve(`${import.meta.dir}/../results`)
 const LOG = `${RESULTS}/tokenomics-${new Date().toISOString().replace(/\.\d+Z$/, "Z").replaceAll(":", "-")}.log`
+// The RPC access key, the URL's path, is shown as <access key> on screen and in the log, so
+// logs can be shared as they are.
+let accessKey = ""
+const redact = (text: string) => (accessKey ? text.replaceAll(accessKey, "<access key>") : text)
+let logging = false
+const print = console.log
+console.log = (...args: unknown[]) => {
+  const text = redact(args.map(String).join(" "))
+  print(text)
+  if (logging) appendFileSync(LOG, `${text}\n`)
+}
 function startLog() {
   mkdirSync(RESULTS, { recursive: true })
-  const print = console.log
-  console.log = (...args: unknown[]) => {
-    print(...args)
-    appendFileSync(LOG, `${args.map(String).join(" ")}\n`)
+  logging = true
+}
+
+// What the RPC answered when it last refused a request, set by the transport. viem keeps only the
+// `error` field of the body, which drops the RPC's own explanation.
+let refusal: string | undefined
+function refusedBy(error: unknown): string | undefined {
+  for (let e: unknown = error; e instanceof Error; e = e.cause) {
+    if (e instanceof HttpRequestError) return refusal ?? `${e.status} ${e.details}`
   }
 }
+
 process.on("uncaughtException", (error) => {
-  console.log(`stopped: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
+  const refused = refusedBy(error)
+  if (refused) console.log(`stopped: the RPC refused a request: ${refused}`)
+  else console.log(`stopped: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
   process.exit(2)
 })
 
@@ -114,7 +134,16 @@ function liveKey(name: string, key: string): Hex {
   return key as Hex
 }
 
-const RPC_URL = required("ARKIV_RPC_URL")
+// The access key, if given, goes last in the URL's path, as Arkiv's RPC expects it.
+const RPC_ACCESS_KEY = process.env.ARKIV_RPC_ACCESS_KEY?.trim()
+const RPC_URL = RPC_ACCESS_KEY
+  ? `${required("ARKIV_RPC_URL").replace(/\/+$/, "")}/${encodeURIComponent(RPC_ACCESS_KEY)}`
+  : required("ARKIV_RPC_URL")
+try {
+  accessKey = new URL(RPC_URL).pathname.replace(/^\/+|\/+$/g, "")
+} catch {
+  fail(`ARKIV_RPC_URL is not a URL`)
+}
 const CHAIN_ID = positiveInteger("ARKIV_CHAIN_ID", required("ARKIV_CHAIN_ID"))
 const KEYSTORE = keystorePath("ARKIV_KEYSTORE", required("ARKIV_KEYSTORE"))
 const GENESIS = process.env.GENESIS?.trim() ? resolve(process.env.GENESIS.trim()) : undefined
@@ -289,7 +318,18 @@ function bigValues(i: number, author: Hex) {
   }
 }
 
-const transport = http(RPC_URL)
+// viem retries a rate-limited request without a word, which makes a run crawl; say so, once.
+let rateLimited = false
+const transport = http(RPC_URL, {
+  onFetchResponse: async (response) => {
+    if (response.ok) return
+    refusal = `${response.status} ${(await response.clone().text()).trim().slice(0, 500)}`
+    if (response.status === 429 && !rateLimited) {
+      rateLimited = true
+      console.log(`the RPC rate limits this run, so it will be slow: ${refusal}`)
+    }
+  },
+})
 const chainId = await createPublicClient({ transport }).getChainId()
 if (chainId !== CHAIN_ID) fail(`${RPC_URL} serves chain ${chainId}, not ARKIV_CHAIN_ID ${CHAIN_ID}`)
 const chain = defineChain({
@@ -433,6 +473,8 @@ function describeFailure(error: unknown): string {
   for (let e: unknown = error; e instanceof Error; e = e.cause) {
     if (e instanceof ContractFunctionRevertedError && e.reason) message += ` (reason: ${e.reason})`
   }
+  const refused = refusedBy(error)
+  if (refused) message += ` (the RPC answered ${refused})`
   const txHash = (error as { txHash?: Hex }).txHash
   return txHash ? `${message}, mined in ${txHash}` : `${message}, not mined`
 }

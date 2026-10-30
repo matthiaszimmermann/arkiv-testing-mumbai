@@ -14,12 +14,13 @@ creation; outside it, install bun 1.3 and run `bun install`.
 cp .env.example .env
 ```
 
-`.env` comes with rabdi's RPC URL and chain id. Adding an access key
-([hub.arkiv.network/access-keys](https://hub.arkiv.network/access-keys)) to the URL is recommended,
-as the public endpoint is heavily rate limited:
+`.env` comes with rabdi's RPC URL and chain id. Setting an access key
+([hub.arkiv.network/access-keys](https://hub.arkiv.network/access-keys)) is recommended, as the
+public endpoint is heavily rate limited. The run appends it to the URL and keeps it out of its
+output:
 
 ```
-ARKIV_RPC_URL=https://rpc.rabdi.db-chain.testnet.arkiv.network/<accessKey>
+ARKIV_RPC_ACCESS_KEY=<accessKey>
 ```
 
 ## Wallet

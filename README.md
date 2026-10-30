@@ -104,6 +104,79 @@ it cost the sender.
 
 `.env.example` lists every setting. Values given on the command line override `.env`.
 
+## Throughput
+
+A second script, `experiment/throughput.ts`, creates entities in batches: each batch is one
+transaction. It has two sections, and by default runs both:
+
+- **batches:** each iteration sends one batch of 10, 50, 100 and 200 entities. Each batch's line
+  shows its gas, calldata size, fee, wait time, how full its block was and the block's base fee.
+  An overview then gives, for each batch size, the gas and fee per entity and how many entities
+  fit in a block and in a second.
+- **fill:** fills 20 consecutive blocks well above the base fee's target, to see gas get more
+  expensive. After one probe batch to learn the gas, it keeps 16 batches of 50 entities pending
+  at all times, more than a block takes (5 at a 30M gas limit), and sends new ones as soon as a
+  block takes some. A batch the RPC refuses is sent again with the same nonce, as a skipped nonce
+  would hold back all batches after it. A line per block shows its fill and base fee as the run
+  goes. At the end a table shows each block, from just before the fill to a
+  few blocks after, with its base fee's change next to what EIP-1559 would set, and the gas price
+  paid by the first batch against the last.
+
+The run is logged to `results/throughput-<time>.log`.
+
+The batch size sets the entities' shape. The RPC refuses requests of 256 KiB or more (a 413), and
+a transaction travels in them hex-encoded, at twice its size. The ABI encoding takes 352 bytes per
+create and 192 per attribute, however small the values. So each batch size gets as many
+attributes, up to 7, as still fit one transaction:
+
+| Batch | Attributes | Indexed | Kept |
+| --- | --- | --- | --- |
+| 10, 50 | 7 | 3 | category, priority, author, body, title, summary, version |
+| 100 | 4 | 3 | category, priority, author, body |
+| 200 | 1 | 1 | category |
+
+Every value fits in 32 bytes; the body is 32 random bytes. A batch of more than 238 entities is
+refused before the run starts.
+
+Start with one iteration, then add more:
+
+```sh
+bun run throughput
+ITERATIONS=5 bun run throughput
+```
+
+`BATCH_SIZES` changes the sizes and `LIFETIME` sets how many blocks the entities live (default
+100, which keeps storage cheap).
+
+By default each batch waits for the one before it to be mined, so every batch has a block to
+itself and `entities/block` in the overview is worked out from gas. To see how many actually fit,
+send several batches of a size at once:
+
+```sh
+PARALLEL=8 bun run throughput
+```
+
+Each step then sends 8 batches of one size together at the start of a block, and a line under them
+shows which blocks they landed in. The overview's `seen/block` column gives the most entities of
+each size seen in one block. All batches come from the one sender, so the chain takes them in nonce
+order: a batch that doesn't fit the rest of a block holds back the ones after it. `PARALLEL` is at
+most 16, the pending transactions reth guarantees per sender. If a batch in a step fails, the run
+stops, since the batches after it may still be pending.
+
+The fill costs the most: a full 30M-gas block takes 0.03 GLM at a base fee of 1 gwei, and more as
+the base fee climbs. The run retries requests the access key's rate limit refuses, for about a
+minute each, so a burst slows down instead of failing. It stops sending early once it has spent `FILL_BUDGET` (default 5 GLM); the
+batches still pending then land on top of that. To run only the fill, or fill for longer:
+
+```sh
+SECTIONS=fill bun run throughput
+SECTIONS=fill FILL_BLOCKS=50 FILL_BUDGET=10 bun run throughput
+```
+
+The expected base fee uses Ethereum's rule: a target of half the block gas limit, and a change of
+at most 1/8 per block. If rabdi uses another rule, set `BASE_FEE_ELASTICITY` and
+`BASE_FEE_DENOMINATOR`; the `change` column shows what the chain actually did either way.
+
 ## Things to know
 
 - Entities are public and stay on the chain until they expire. The long lifetime is the chain's

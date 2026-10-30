@@ -8,6 +8,7 @@
   "scripts": {
     "new-wallet": "bun experiment/new-wallet.ts",
     "tokenomics": "bun experiment/tokenomics.ts",
+    "throughput": "bun experiment/throughput.ts",
     "typecheck": "bunx tsc --noEmit"
   },
   "dependencies": {

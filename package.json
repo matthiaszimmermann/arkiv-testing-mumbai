@@ -2,6 +2,7 @@
   "name": "arkiv-testing-mumbai",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Measures what Arkiv entity operations cost on a live chain",
   "scripts": {

@@ -2,8 +2,39 @@
 
 Measures what Arkiv entity operations cost on rabdi, Arkiv's testnet: gas, storage gas and fees
 for creates of three sizes and three lifetimes, and for a patch, an extend, a transfer and a delete.
-[setup.md](setup.md) has the background: what is measured, where the script comes from, and how it
-differs from the dev-node original.
+
+## What it measures
+
+The script, `experiment/tokenomics.ts`, works through the Arkiv TypeScript SDK and prints tables.
+It asserts nothing, so it works with any fee schedule.
+
+- **Creates:** three entity sizes, each with three lifetimes. For each, the gas used, the storage
+  part of it, the fee in GLM and USD, and how many such transactions fit in a block.
+
+  | Kind | Attributes | Indexed | Body |
+  | --- | --- | --- | --- |
+  | minimal | 1 | 0 | none |
+  | normal | 10 | 4 | 300 bytes |
+  | big | 20 | 15 | 100 KiB |
+
+  Lifetimes: short (100 blocks), medium (one week, 302,400 blocks at 2 s per block) and long (the
+  chain's maximum lifetime).
+- **Operations:** a patch, an extend by one week, a transfer and a delete, for each size.
+- **Block fill (optional):** many senders submit at once, and a table shows how many operations fit
+  in each block.
+
+## Source
+
+The script started as `kurtosis/integration/experiment/tokenomics.ts` in `Arkiv-Network/arkiv`,
+branch `matthiaszimmermann/feat/tokenomics-init`, commit `70ae602`, written against local dev
+nodes. Here it is adapted to a live chain: an encrypted wallet instead of dev keys, a chain-id
+check, flagging of storage figures that other traffic may have affected, an opt-in block fill with
+its own wallets, a measured block time, and a log per run.
+
+The dependency versions are those that branch's lockfile resolved to, except the SDK: that branch
+used `@arkiv-network/sdk@0.9.0-next.3`, and this repo uses `0.9.0-next.5`, the first version that
+defines the rabdi chain. Between the two, nothing changed in the write path or in `getEntity`,
+which are all the script uses.
 
 ## Setup
 

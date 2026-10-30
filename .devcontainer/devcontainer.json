@@ -1,0 +1,14 @@
+{
+  "name": "arkiv-testing-rabdi",
+  "build": { "dockerfile": "Dockerfile" },
+  "remoteUser": "vscode",
+  "mounts": [
+    "source=arkiv-testing-claude,target=/home/vscode/.claude,type=volume"
+  ],
+  "postCreateCommand": "[ ! -f package.json ] || bun install --frozen-lockfile",
+  "customizations": {
+    "vscode": {
+      "extensions": ["anthropic.claude-code", "oven.bun-vscode"]
+    }
+  }
+}

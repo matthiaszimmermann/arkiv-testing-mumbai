@@ -1,0 +1,22 @@
+2026-10-30T16:19:48.045Z, log /workspaces/arkiv-testing-mumbai/results/tokenomics-2026-10-30T16-19-41Z.log
+node https://rpc.rabdi.db-chain.testnet.arkiv.network, chain 7794095, block 4,036, block gas limit 30,000,000
+sender 0x61b26f78d55939497a51fC11281878FC6fb77209, balance 100.000000000 GLM
+max_lifetime 7,884,000 blocks from MAX_LIFETIME, no genesis file
+sections: creates; GLM at $0.1
+block time 2.000 s over the last 1,000 blocks; the SDK counts 2 s
+  short            100 blocks = 0.00 days
+  medium       302,400 blocks = 7.00 days
+  long       7,884,000 blocks = 182.50 days
+
+creates, 1 per kind and lifetime
+kind     lifetime    blocks cells indexed     bytes   gasLimit    gasUsed    storage      other others entityKey 
+minimal  short          100     1       0         0     29,090     28,742         *2    *28,740      2 0x245e6e737f5621975366bd430d5cb2575477598fcd86d90f498208e541164fa7
+
+overview, average per create; storage and other over the clean creates only
+kind     lifetime    blocks    gasUsed    storage      other per block  tx fee (GLM)        USD    ok clean
+minimal  short          100     28,742          -          -     1,043   0.000028742  $0.000003   1/1   0/1
+
+read back, first entity of each kind
+minimal  matches what was written
+
+sender spent 0.000028742 GLM ($0.000003) in this run; log /workspaces/arkiv-testing-mumbai/results/tokenomics-2026-10-30T16-19-41Z.log

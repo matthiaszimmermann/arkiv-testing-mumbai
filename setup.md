@@ -8,7 +8,7 @@ chain.
 ## What it measures
 
 The script `experiment/tokenomics.ts` goes through the Arkiv TypeScript SDK
-(`@arkiv-network/sdk@0.9.0-next.3`) and prints tables. It doesn't assert anything, so it works with
+(`@arkiv-network/sdk@0.9.0-next.5`) and prints tables. It doesn't assert anything, so it works with
 any fee schedule.
 
 - **Creates:** three entity sizes, each with three lifetimes. For each one it reports gas used, the
@@ -31,7 +31,9 @@ any fee schedule.
 The script is copied unchanged from the `Arkiv-Network/arkiv` repository, branch
 `matthiaszimmermann/feat/tokenomics-init`, commit `70ae602`, file
 `kurtosis/integration/experiment/tokenomics.ts`. The dependency versions in `package.json` are
-the ones that branch's lockfile resolved to.
+the ones that branch's lockfile resolved to, except the SDK: that branch used `0.9.0-next.3`, and
+this repository uses `0.9.0-next.5`, the first version that defines the rabdi chain. Between the
+two, nothing changed in the write path or in `getEntity`, which are all the script uses.
 
 ## Changes needed before running on a live chain
 
@@ -40,7 +42,7 @@ a live chain. [SETUP.md](SETUP.md) gives the agent doing the setup exact instruc
 
 | Dev-node assumption | Change for the live chain |
 | --- | --- |
-| Falls back to a publicly known dev key | Require a real key from `.env`, which git ignores, and refuse the dev key |
+| Falls back to a publicly known dev key | Read the key from an encrypted keystore file (made with `bun run new-wallet`, kept in `wallets/`, which git ignores), ask for its password on the terminal, and refuse the dev keys. No private key is ever stored in plaintext |
 | Reads the maximum lifetime from the local dev genesis file | Require the live chain's genesis file, or its maximum lifetime directly, and check the chain id |
 | Storage gas is taken from changes in the pool's balance, assuming no other traffic | Flag any measurement where other Arkiv transactions landed in the same blocks, and leave it out of the averages |
 | The block-fill test sends from dev accounts anyone can control | Make the test opt-in, using keys we provide |
@@ -61,10 +63,12 @@ The run happens in stages, with approval between them:
 ## Inputs needed
 
 - RPC URL and chain id
-- A funded sender key, put in `.env` by whoever owns it and never pasted into chat or committed
+- A funded sender account: its owner makes it with `bun run new-wallet`, funds the address it
+  prints, and types the password when a run asks. The key exists only encrypted on disk and
+  decrypted in memory, and is never pasted into chat or committed
 - The chain's genesis file, or its maximum lifetime in blocks
 - A budget in GLM, and the GLM price in USD for the dollar figures
-- Whether the block-fill test may run, and if so, funded keys for its extra senders
+- Whether the block-fill test may run, and if so, funded keystores for its extra senders
 - Whether the chain carries other traffic, which affects how far the storage figures can be trusted
 
 ## Side effects

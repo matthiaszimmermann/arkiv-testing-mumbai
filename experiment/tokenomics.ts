@@ -1,29 +1,39 @@
-// What entity operations cost through SDK-next, in three sections (SECTIONS, default all):
+// What entity operations cost through SDK-next on a live chain, in three sections (SECTIONS,
+// default creates,ops):
 //
 // - creates: entities of three sizes and three lifetimes, each with the SDK's gas limit, the gas
 //   used, how much of it was storage gas (paid into the pool at ARKIV_ADDRESS), the fee, and how
 //   many of it fit in a block. Ends with an overview of the 9 combinations.
 // - ops: per kind, a patch, an extend by a week, a transfer and a delete, measured the same way.
 // - block: many senders send creates, patches and extends at once, and a table shows how many of
-//   each landed in which block and how full each block got.
+//   each landed in which block and how full each block got. Opt-in, and only as a run of its own.
 //
-// Not a test: it asserts nothing about prices, so it runs against any fee schedule. See
-// docs/sdk-next-testing.md for the node to run it against.
+// Not a test: it asserts nothing about prices, so it runs against any fee schedule.
 //
 //   bun experiment/tokenomics.ts
 //
-// Run on its own: the name has no `.test.ts`, so `bun test` leaves it out.
+// Everything it prints is also written to results/tokenomics-<time>.log.
 //
-// ARKIV_RPC_URL and ARKIV_FUNDED_KEY as for the tests (defaults: a local `--dev` node and its
-// first hardhat key). GENESIS is the genesis file the node runs on (default genesis/dev.json):
-// the node does not serve its fee schedule, so the longest lifetime, `max_lifetime`, is read from
-// there. COUNT entities per combination (default 3). ONLY limits the creates to some combinations,
-// e.g. ONLY=big/long,normal/short. GLM_USD prices the fees in dollars (default 0.1).
+// Settings come from the environment; bun reads .env, which git ignores (see .env.example):
 //
-// The block section sends from hardhat accounts 1 to BLOCK_SENDERS (default 19) of the dev
-// mnemonic, which the dev genesis funds; each sends BLOCK_CREATES, BLOCK_PATCHES and
-// BLOCK_EXTENDS of the normal kind (default 5 each). reth's pool guarantees 16 pending
-// transactions per sender, so the three together may not exceed that.
+// - ARKIV_RPC_URL and ARKIV_CHAIN_ID: the chain, required. The run stops if the RPC serves
+//   another chain id.
+// - ARKIV_KEYSTORE: the sender's encrypted keystore file, required, made with
+//   experiment/new-wallet.ts. The run asks for its password on the terminal and keeps the key in
+//   memory only. The publicly known dev keys are refused.
+// - GENESIS or MAX_LIFETIME: the node does not serve its fee schedule, so the longest lifetime,
+//   `max_lifetime` in blocks, comes from the chain's genesis file or is given directly. One of
+//   the two is required; if both are given they must agree, and the genesis must be for
+//   ARKIV_CHAIN_ID.
+// - COUNT entities per combination (default 3). ONLY limits the creates to some combinations,
+//   e.g. ONLY=big/long,normal/short. GLM_USD prices the fees in dollars (default 0.1).
+// - BLOCK_TIME_SAMPLE: how many recent blocks the chain's block time is measured over (default
+//   1000). The SDK turns durations into blocks at 2 s each; the run says what they last instead.
+//
+// The block section sends from BLOCK_KEYSTORES, comma-separated keystore files of funded accounts,
+// one sender each; keystores that share the sender's password are not asked for again. Each sends BLOCK_CREATES, BLOCK_PATCHES and BLOCK_EXTENDS of the normal kind
+// (default 5 each). reth's pool guarantees 16 pending transactions per sender, so the three
+// together may not exceed that.
 //
 // The schemas are unnamed: a named one adds an indexed `arkiv.schema` attribute to every entity,
 // which would change the counts below. Every kind carries exactly the attributes listed.
@@ -41,36 +51,135 @@ import {
   type Lifetime,
   type Schema,
 } from "@arkiv-network/sdk-next"
+import { appendFileSync, existsSync, mkdirSync } from "node:fs"
 import { resolve } from "node:path"
 import { ContractFunctionRevertedError, defineChain, http, toHex, type Hex } from "viem"
 import { mnemonicToAccount, privateKeyToAccount } from "viem/accounts"
+import { unlock } from "./keystore"
 
-const RPC_URL = process.env.ARKIV_RPC_URL ?? "http://127.0.0.1:8545"
-const FUNDED_KEY = (process.env.ARKIV_FUNDED_KEY ??
-  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80") as Hex
-const GENESIS = resolve(process.env.GENESIS ?? `${import.meta.dir}/../../../genesis/dev.json`)
-const COUNT = Number(process.env.COUNT ?? 3)
+// Everything printed also goes to a log of its own per run, appended line by line so that a run
+// which stops halfway keeps what it measured, and the error it stopped with. The log starts once
+// the settings are checked, so a run refused for them leaves none.
+const RESULTS = resolve(`${import.meta.dir}/../results`)
+const LOG = `${RESULTS}/tokenomics-${new Date().toISOString().replace(/\.\d+Z$/, "Z").replaceAll(":", "-")}.log`
+function startLog() {
+  mkdirSync(RESULTS, { recursive: true })
+  const print = console.log
+  console.log = (...args: unknown[]) => {
+    print(...args)
+    appendFileSync(LOG, `${args.map(String).join(" ")}\n`)
+  }
+}
+process.on("uncaughtException", (error) => {
+  console.log(`stopped: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
+  process.exit(2)
+})
+
+function fail(message: string): never {
+  console.log(`refusing to run: ${message}`)
+  process.exit(2)
+}
+
+function required(name: string): string {
+  const value = process.env[name]?.trim()
+  if (!value) fail(`${name} is not set; see .env.example`)
+  return value
+}
+
+function positiveInteger(name: string, value: string | number): number {
+  const n = Number(value)
+  if (!Number.isSafeInteger(n) || n <= 0) fail(`${name} is ${value}, not a positive integer`)
+  return n
+}
+
+// The mnemonic hardhat, anvil and the dev genesis fund their accounts from. Anyone can derive
+// its keys, so on a live chain whatever those accounts hold is anyone's to take.
+const DEV_MNEMONIC = "test test test test test test test test test test test junk"
+const DEV_ADDRESSES = new Set(
+  Array.from({ length: 20 }, (_, i) => mnemonicToAccount(DEV_MNEMONIC, { addressIndex: i }).address.toLowerCase()),
+)
+
+function keystorePath(name: string, path: string): string {
+  const full = resolve(path)
+  if (!existsSync(full)) fail(`${name} is ${full}, which does not exist; make one with experiment/new-wallet.ts`)
+  return full
+}
+
+// A private key as decrypted; the error names where it came from, never the key.
+function liveKey(name: string, key: string): Hex {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(key)) fail(`${name} is not a 0x-prefixed 32-byte hex private key`)
+  if (DEV_ADDRESSES.has(privateKeyToAccount(key as Hex).address.toLowerCase())) {
+    fail(`${name} is one of the publicly known dev keys; use a key of your own`)
+  }
+  return key as Hex
+}
+
+const RPC_URL = required("ARKIV_RPC_URL")
+const CHAIN_ID = positiveInteger("ARKIV_CHAIN_ID", required("ARKIV_CHAIN_ID"))
+const KEYSTORE = keystorePath("ARKIV_KEYSTORE", required("ARKIV_KEYSTORE"))
+const GENESIS = process.env.GENESIS?.trim() ? resolve(process.env.GENESIS.trim()) : undefined
+const COUNT = positiveInteger("COUNT", process.env.COUNT ?? 3)
 const ONLY = process.env.ONLY?.split(",").map((s) => s.trim())
-const SECTIONS = (process.env.SECTIONS ?? "creates,ops,block").split(",").map((s) => s.trim())
+const SECTIONS = (process.env.SECTIONS ?? "creates,ops").split(",").map((s) => s.trim())
 const GLM_USD = Number(process.env.GLM_USD ?? 0.1)
-const BLOCK_SENDERS = Number(process.env.BLOCK_SENDERS ?? 19)
+const BLOCK_TIME_SAMPLE = BigInt(positiveInteger("BLOCK_TIME_SAMPLE", process.env.BLOCK_TIME_SAMPLE ?? 1000))
 const BLOCK_CREATES = Number(process.env.BLOCK_CREATES ?? 5)
 const BLOCK_PATCHES = Number(process.env.BLOCK_PATCHES ?? 5)
 const BLOCK_EXTENDS = Number(process.env.BLOCK_EXTENDS ?? 5)
 
-// The mnemonic of the dev genesis' funded accounts; account 0 is ARKIV_FUNDED_KEY's default.
-const DEV_MNEMONIC = "test test test test test test test test test test test junk"
+for (const section of SECTIONS) {
+  if (!["creates", "ops", "block"].includes(section)) fail(`unknown section ${section} in SECTIONS`)
+}
+// The block section floods the chain from several accounts, so it runs only when asked for by
+// name, on its own, with keystores given for it.
+const BLOCK_KEYSTORES = SECTIONS.includes("block")
+  ? required("BLOCK_KEYSTORES").split(",").map((path, i) => keystorePath(`BLOCK_KEYSTORES[${i}]`, path.trim()))
+  : []
+if (SECTIONS.includes("block") && SECTIONS.length > 1) fail("run SECTIONS=block on its own")
+if (new Set(BLOCK_KEYSTORES).size !== BLOCK_KEYSTORES.length) fail("BLOCK_KEYSTORES lists the same file twice")
 
-// The pool storage gas is paid into: `base_fee × storage_gas` per transaction.
+// The pool storage gas is paid into: `base_fee × storage_gas` per transaction. It is also the
+// address every Arkiv operation is sent to.
 const POOL = "0x4400000000000000000000000000000000000044"
 
-const genesis = await Bun.file(GENESIS).json()
-const WEIGHTS: Record<string, number> = genesis.config.arkiv.golemdb.metering.weights
-const MAX_LIFETIME = WEIGHTS["host.arkiv.max_lifetime"]!
+const genesis = GENESIS ? await Bun.file(GENESIS).json() : undefined
+if (genesis && genesis.config?.chainId !== CHAIN_ID) {
+  fail(`${GENESIS} is for chain ${genesis.config?.chainId}, not ARKIV_CHAIN_ID ${CHAIN_ID}`)
+}
+const WEIGHTS: Record<string, number> = genesis?.config.arkiv.golemdb.metering.weights ?? {}
+const GENESIS_MAX_LIFETIME = WEIGHTS["host.arkiv.max_lifetime"]
+if (genesis && GENESIS_MAX_LIFETIME === undefined) fail(`${GENESIS} has no host.arkiv.max_lifetime`)
+if (!genesis && !process.env.MAX_LIFETIME) fail("set GENESIS or MAX_LIFETIME; see .env.example")
+const MAX_LIFETIME = positiveInteger("MAX_LIFETIME", process.env.MAX_LIFETIME?.trim() || GENESIS_MAX_LIFETIME!)
+if (GENESIS_MAX_LIFETIME !== undefined && MAX_LIFETIME !== GENESIS_MAX_LIFETIME) {
+  fail(`MAX_LIFETIME ${MAX_LIFETIME} differs from ${GENESIS_MAX_LIFETIME} in ${GENESIS}`)
+}
 const HOST_WEIGHTS = Object.fromEntries(Object.entries(WEIGHTS).filter(([name]) => name.startsWith("host.")))
 
-// In blocks. The SDK turns durations into blocks at a fixed 2 s block time, as the node's
-// `--dev.block-time 2s` makes them.
+// The keys, decrypted into memory once every other setting is checked, so a run refused for one
+// of those asks for no password. Keystores that share a password are asked for once.
+async function unlockKey(name: string, path: string, remembered: { password?: string }): Promise<Hex> {
+  try {
+    return liveKey(name, await unlock(path, remembered))
+  } catch (error) {
+    fail(`${name} ${path}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+const remembered: { password?: string } = {}
+const FUNDED_KEY = await unlockKey("ARKIV_KEYSTORE", KEYSTORE, remembered)
+const BLOCK_KEYS: Hex[] = []
+for (const [i, path] of BLOCK_KEYSTORES.entries()) {
+  BLOCK_KEYS.push(await unlockKey(`BLOCK_KEYSTORES[${i}]`, path, remembered))
+}
+if (new Set(BLOCK_KEYS.map((key) => key.toLowerCase())).size !== BLOCK_KEYS.length) {
+  fail("BLOCK_KEYSTORES holds the same key twice")
+}
+
+startLog()
+
+// In blocks. The SDK turns durations into blocks at a fixed 2 s block time, so "a week" is
+// 302,400 blocks whatever the chain's block time; the run measures that and says what they last.
+const SDK_BLOCK_TIME = 2
 const LIFETIMES: { name: string; blocks: number; expiration: Lifetime }[] = [
   { name: "short", blocks: 100, expiration: ExpirationTime.fromBlocks(100) },
   { name: "medium", blocks: 7 * 24 * 60 * 30, expiration: ExpirationTime.fromWeeks(1) },
@@ -182,6 +291,7 @@ function bigValues(i: number, author: Hex) {
 
 const transport = http(RPC_URL)
 const chainId = await createPublicClient({ transport }).getChainId()
+if (chainId !== CHAIN_ID) fail(`${RPC_URL} serves chain ${chainId}, not ARKIV_CHAIN_ID ${CHAIN_ID}`)
 const chain = defineChain({
   id: chainId,
   name: `arkiv-${chainId}`,
@@ -191,7 +301,14 @@ const chain = defineChain({
 const publicClient = createPublicClient({ chain, transport })
 const account = privateKeyToAccount(FUNDED_KEY)
 const wallet = createWalletClient({ chain, transport, account })
-const BLOCK_GAS_LIMIT = (await publicClient.getBlock()).gasLimit
+const head = await publicClient.getBlock()
+const BLOCK_GAS_LIMIT = head.gasLimit
+// The chain's block time, averaged over the last BLOCK_TIME_SAMPLE blocks' timestamps.
+const sampleStart = await publicClient.getBlock({
+  blockNumber: head.number > BLOCK_TIME_SAMPLE ? head.number - BLOCK_TIME_SAMPLE : 0n,
+})
+if (head.number === sampleStart.number) fail(`chain ${chainId} has no blocks to measure the block time over`)
+const BLOCK_TIME = Number(head.timestamp - sampleStart.timestamp) / Number(head.number - sampleStart.number)
 // An address with no key, to transfer entities to.
 const TRANSFER_TO = "0x000000000000000000000000000000000000dEaD"
 
@@ -246,6 +363,9 @@ type Cost = {
   gasUsed: bigint
   storage: bigint
   fee: bigint
+  // Other transactions to ARKIV_ADDRESS in the blocks the measurement spans; with any, `storage`
+  // may include what they paid into the pool.
+  others: number
 }
 
 type Row = Cost & {
@@ -253,26 +373,46 @@ type Row = Cost & {
   values: Record<string, unknown>
 }
 
-// One transaction, with the pool read at `latest` around it: GolemDB serves no past state, and
-// nothing else pays into the pool on a private dev node. The fee is what the sender paid,
-// gasUsed × the effective gas price, of which `storage × base fee` went to the pool.
+// The pool's balance at `latest`, and the block numbers seen just before and after reading it:
+// the balance is that of one of the blocks in between.
+async function readPool(): Promise<{ balance: bigint; from: bigint; to: bigint }> {
+  const from = await publicClient.getBlockNumber({ cacheTime: 0 })
+  const balance = await publicClient.getBalance({ address: POOL })
+  const to = await publicClient.getBlockNumber({ cacheTime: 0 })
+  return { balance, from, to }
+}
+
+// One transaction, with the pool read at `latest` around it: GolemDB serves no past state. On a
+// live chain other Arkiv transactions may pay into the pool between the two reads, so every block
+// that may lie between them is searched for transactions to ARKIV_ADDRESS other than this one.
+// The fee is what the sender paid, gasUsed × the effective gas price, of which
+// `storage × base fee` went to the pool.
 async function measure<T extends { txHash: Hex }>(send: () => Promise<T>): Promise<{ result: T; cost: Cost }> {
-  const before = await publicClient.getBalance({ address: POOL })
+  const before = await readPool()
   const result = await send()
-  const after = await publicClient.getBalance({ address: POOL })
+  const after = await readPool()
   const receipt = await publicClient.getTransactionReceipt({ hash: result.txHash })
   if (receipt.status !== "success") throw new Error(`${result.txHash} ${receipt.status}`)
   const block = await publicClient.getBlock({ blockNumber: receipt.blockNumber })
   const tx = await publicClient.getTransaction({ hash: result.txHash })
   const baseFee = block.baseFeePerGas ?? 0n
   if (baseFee === 0n) throw new Error(`block ${receipt.blockNumber} has no base fee`)
+  if (receipt.blockNumber <= before.from || receipt.blockNumber > after.to) {
+    throw new Error(`${result.txHash} landed in block ${receipt.blockNumber}, outside the pool reads`)
+  }
+  let others = 0
+  for (let number = before.from + 1n; number <= after.to; number++) {
+    const { transactions } = await publicClient.getBlock({ blockNumber: number, includeTransactions: true })
+    others += transactions.filter((t) => t.to?.toLowerCase() === POOL.toLowerCase() && t.hash !== result.txHash).length
+  }
   return {
     result,
     cost: {
       gasLimit: tx.gas,
       gasUsed: receipt.gasUsed,
-      storage: (after - before) / baseFee,
+      storage: (after.balance - before.balance) / baseFee,
       fee: receipt.gasUsed * receipt.effectiveGasPrice,
+      others,
     },
   }
 }
@@ -321,12 +461,36 @@ const line = (cells: [string, number][]) =>
   cells.map(([text, width]) => (width < 0 ? text.padEnd(-width) : text.padStart(width))).join(" ")
 const avg = <T,>(rows: T[], pick: (r: T) => bigint) =>
   rows.reduce((sum, r) => sum + pick(r), 0n) / BigInt(rows.length)
+// A measurement's storage split, marked `*` when other Arkiv transactions shared its blocks.
+const storageOf = (cost: Cost) => (cost.others ? `*${fmt(cost.storage)}` : fmt(cost.storage))
+const otherOf = (cost: Cost) => (cost.others ? `*${fmt(cost.gasUsed - cost.storage)}` : fmt(cost.gasUsed - cost.storage))
 
+// A number of blocks as the time they last at the measured block time.
+const days = (blocks: number) => `${((blocks * BLOCK_TIME) / 86400).toFixed(2)} days`
+
+const startBalance = await publicClient.getBalance({ address: account.address })
 console.log(
-  `node ${RPC_URL}, chain ${chainId}, sender ${account.address}, block gas limit ${fmt(BLOCK_GAS_LIMIT)}\n` +
-    `schedule from ${GENESIS}: ${JSON.stringify(HOST_WEIGHTS)}, base fee ${genesis.baseFeePerGas ?? "default"}\n` +
+  `${new Date().toISOString()}, log ${LOG}\n` +
+    `node ${RPC_URL}, chain ${chainId}, block ${fmt(head.number)}, block gas limit ${fmt(BLOCK_GAS_LIMIT)}\n` +
+    `sender ${account.address}, balance ${glm(startBalance)} GLM\n` +
+    (genesis
+      ? `schedule from ${GENESIS}: ${JSON.stringify(HOST_WEIGHTS)}, base fee ${genesis.baseFeePerGas ?? "default"}\n`
+      : `max_lifetime ${fmt(MAX_LIFETIME)} blocks from MAX_LIFETIME, no genesis file\n`) +
     `sections: ${SECTIONS.join(", ")}; GLM at $${GLM_USD}`,
 )
+console.log(
+  `block time ${BLOCK_TIME.toFixed(3)} s over the last ${fmt(head.number - sampleStart.number)} blocks; ` +
+    `the SDK counts ${SDK_BLOCK_TIME} s`,
+)
+for (const lifetime of LIFETIMES) console.log(`  ${lifetime.name.padEnd(8)} ${fmt(lifetime.blocks).padStart(11)} blocks = ${days(lifetime.blocks)}`)
+// The SDK's "week" is a calendar week only at its own block time; say so when the chain's is off
+// by more than 1%.
+if (Math.abs(BLOCK_TIME - SDK_BLOCK_TIME) / SDK_BLOCK_TIME > 0.01) {
+  console.log(
+    `note: the block time is not ${SDK_BLOCK_TIME} s, so "medium" and "extend +1 week" last ` +
+      `${days(7 * 24 * 60 * 30)}, not a calendar week`,
+  )
+}
 
 let mismatches = 0
 
@@ -336,7 +500,7 @@ if (SECTIONS.includes("creates")) {
   console.log(`\ncreates, ${COUNT} per kind and lifetime`)
   console.log(
     line([["kind", -8], ["lifetime", -8], ["blocks", 9], ["cells", 5], ["indexed", 7], ["bytes", 9],
-      ["gasLimit", 10], ["gasUsed", 10], ["storage", 10], ["other", 10], ["entityKey", -10]]),
+      ["gasLimit", 10], ["gasUsed", 10], ["storage", 10], ["other", 10], ["others", 6], ["entityKey", -10]]),
   )
 
   const results = new Map<string, Row[]>()
@@ -351,7 +515,7 @@ if (SECTIONS.includes("creates")) {
           console.log(
             line([[kind.name, -8], [lifetime.name, -8], [fmt(lifetime.blocks), 9], [String(kind.cells), 5],
               [String(kind.indexed), 7], [fmt(kind.bodyBytes), 9], [fmt(row.gasLimit), 10],
-              [fmt(row.gasUsed), 10], [fmt(row.storage), 10], [fmt(row.gasUsed - row.storage), 10],
+              [fmt(row.gasUsed), 10], [storageOf(row), 10], [otherOf(row), 10], [String(row.others), 6],
               [row.entityKey, -10]]),
           )
         } catch (error) {
@@ -362,10 +526,12 @@ if (SECTIONS.includes("creates")) {
     }
   }
 
-  console.log("\noverview, average per create")
+  // Gas and fees come from the receipts and hold for every create; the storage split only for the
+  // clean ones, those no other Arkiv transaction shared blocks with.
+  console.log("\noverview, average per create; storage and other over the clean creates only")
   console.log(
     line([["kind", -8], ["lifetime", -8], ["blocks", 9], ["gasUsed", 10], ["storage", 10], ["other", 10],
-      ["per block", 9], ["tx fee (GLM)", 13], ["USD", 10], ["ok", 5]]),
+      ["per block", 9], ["tx fee (GLM)", 13], ["USD", 10], ["ok", 5], ["clean", 5]]),
   )
   for (const kind of KINDS) {
     for (const lifetime of LIFETIMES) {
@@ -377,10 +543,13 @@ if (SECTIONS.includes("creates")) {
       }
       const gasUsed = avg(rows, (r) => r.gasUsed)
       const fee = avg(rows, (r) => r.fee)
+      const clean = rows.filter((r) => r.others === 0)
       console.log(
         line([[kind.name, -8], [lifetime.name, -8], [fmt(lifetime.blocks), 9], [fmt(gasUsed), 10],
-          [fmt(avg(rows, (r) => r.storage)), 10], [fmt(avg(rows, (r) => r.gasUsed - r.storage)), 10],
-          [perBlock(gasUsed), 9], [glm(fee), 13], [usd(fee), 10], [`${rows.length}/${COUNT}`, 5]]),
+          [clean.length ? fmt(avg(clean, (r) => r.storage)) : "-", 10],
+          [clean.length ? fmt(avg(clean, (r) => r.gasUsed - r.storage)) : "-", 10],
+          [perBlock(gasUsed), 9], [glm(fee), 13], [usd(fee), 10], [`${rows.length}/${COUNT}`, 5],
+          [`${clean.length}/${rows.length}`, 5]]),
       )
     }
   }
@@ -401,7 +570,7 @@ if (SECTIONS.includes("ops")) {
   console.log("\nops, one each per kind, on entities created for 100 blocks")
   console.log(
     line([["kind", -8], ["op", -24], ["gasLimit", 10], ["gasUsed", 10], ["storage", 10], ["other", 10],
-      ["per block", 9], ["tx fee (GLM)", 13], ["USD", 10]]),
+      ["others", 6], ["per block", 9], ["tx fee (GLM)", 13], ["USD", 10]]),
   )
   for (const kind of KINDS) {
     const short = { expiration: ExpirationTime.fromBlocks(100) }
@@ -425,7 +594,7 @@ if (SECTIONS.includes("ops")) {
         const { cost } = await measure(send)
         console.log(
           line([[kind.name, -8], [label, -24], [fmt(cost.gasLimit), 10], [fmt(cost.gasUsed), 10],
-            [fmt(cost.storage), 10], [fmt(cost.gasUsed - cost.storage), 10], [perBlock(cost.gasUsed), 9],
+            [storageOf(cost), 10], [otherOf(cost), 10], [String(cost.others), 6], [perBlock(cost.gasUsed), 9],
             [glm(cost.fee), 13], [usd(cost.fee), 10]]),
         )
       } catch (error) {
@@ -443,15 +612,15 @@ if (SECTIONS.includes("ops")) {
 if (SECTIONS.includes("block")) {
   const perSender = BLOCK_CREATES + BLOCK_PATCHES + BLOCK_EXTENDS
   if (perSender > 16) throw new Error(`${perSender} transactions per sender; reth's pool guarantees 16`)
-  const senders = Array.from({ length: BLOCK_SENDERS }, (_, i) =>
-    createWalletClient({ chain, transport, account: mnemonicToAccount(DEV_MNEMONIC, { addressIndex: i + 1 }) }),
-  )
+  const senders = BLOCK_KEYS.map((key) => createWalletClient({ chain, transport, account: privateKeyToAccount(key) }))
   const kind = NORMAL
   const week = { expiration: ExpirationTime.fromWeeks(1) }
   console.log(
-    `\nblock: ${BLOCK_SENDERS} senders × (${BLOCK_CREATES} creates, ${BLOCK_PATCHES} patches, ` +
-      `${BLOCK_EXTENDS} extends) of ${kind.name} entities = ${fmt(BLOCK_SENDERS * perSender)} transactions`,
+    `\nblock: ${senders.length} senders × (${BLOCK_CREATES} creates, ${BLOCK_PATCHES} patches, ` +
+      `${BLOCK_EXTENDS} extends) of ${kind.name} entities = ${fmt(senders.length * perSender)} transactions`,
   )
+  const senderBalances = await Promise.all(senders.map((s) => publicClient.getBalance({ address: s.account.address })))
+  for (const [i, s] of senders.entries()) console.log(`  sender ${s.account.address}, balance ${glm(senderBalances[i]!)} GLM`)
 
   // One of each, measured, for the gas limits.
   const probe = senders[0]!
@@ -564,6 +733,14 @@ if (SECTIONS.includes("block")) {
     `${fmt(sent.length - failed.length)} of ${fmt(sent.length)} ops landed in ${byBlock.size} block(s); ` +
       `the fullest held ${fullest.ops} ops at ${fullest.share.toFixed(1)}% of the block gas limit`,
   )
+  const senderSpent = (
+    await Promise.all(senders.map(async (s, i) => senderBalances[i]! - (await publicClient.getBalance({ address: s.account.address }))))
+  ).reduce((sum, spent) => sum + spent, 0n)
+  console.log(`block senders spent ${glm(senderSpent)} GLM (${usd(senderSpent)}) together`)
 }
+
+// What the run cost the sender, for comparing with the budget.
+const spent = startBalance - (await publicClient.getBalance({ address: account.address }))
+console.log(`\nsender spent ${glm(spent)} GLM (${usd(spent)}) in this run; log ${LOG}`)
 
 process.exit(mismatches === 0 ? 0 : 1)

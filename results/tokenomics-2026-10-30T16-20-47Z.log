@@ -1,0 +1,14 @@
+2026-10-30T16:20:52.103Z, log /workspaces/arkiv-testing-mumbai/results/tokenomics-2026-10-30T16-20-47Z.log
+node https://rpc.rabdi.db-chain.testnet.arkiv.network, chain 7794095, block 4,068, block gas limit 30,000,000
+sender 0x61b26f78d55939497a51fC11281878FC6fb77209, balance 99.995807528 GLM
+max_lifetime 7,884,000 blocks from MAX_LIFETIME, no genesis file
+sections: creates, ops; GLM at $0.1
+block time 2.000 s over the last 1,000 blocks; the SDK counts 2 s
+  short            100 blocks = 0.00 days
+  medium       302,400 blocks = 7.00 days
+  long       7,884,000 blocks = 182.50 days
+
+creates, 1 per kind and lifetime
+kind     lifetime    blocks cells indexed     bytes   gasLimit    gasUsed    storage      other others entityKey 
+minimal  short          100     1       0         0     29,090     28,742         *2    *28,740      2 0x240391fa28a37cab340537402e78529f31c70e9a7f68e384d2c18ccd00510703
+minimal  medium   create 0 failed: Transaction failed: Timed out while waiting for transaction with hash "0xae979c27b053ffda7b0ec6b3cd28c2a09251b952cf814c81af171421c21ed411" to be confirmed., mined in 0xae979c27b053ffda7b0ec6b3cd28c2a09251b952cf814c81af171421c21ed411

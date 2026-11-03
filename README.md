@@ -2,6 +2,46 @@
 
 Measures what Arkiv entity operations cost on rabdi, Arkiv's testnet: gas, storage gas and fees
 for creates of three sizes and three lifetimes, and for a patch, an extend, a transfer and a delete.
+Two more scripts measure throughput: how many creates fit in a block.
+
+- [Quick start: ramp](#quick-start-ramp)
+- [What it measures](#what-it-measures)
+- [Source](#source)
+- [Setup](#setup)
+- [Wallet](#wallet)
+- [Running](#running)
+- [Throughput](#throughput)
+- [Ramp](#ramp)
+- [Things to know](#things-to-know)
+
+## Quick start: ramp
+
+How many creates fit in a block at the chain's current gas limit. In the devcontainer, with
+`.env` set up as in [Setup](#setup):
+
+1. Make an encrypted wallet. It asks for a password and prints the wallet's address:
+
+   ```sh
+   bun run new-wallet
+   ```
+
+2. Fund that address with GLM from the faucet. A run takes up to twice `RAMP_BUDGET`
+   (default 1 GLM) for its senders and pays back what they don't spend.
+3. Check that the funds arrived:
+
+   ```sh
+   bun run balance
+   ```
+
+4. Run the ramp. It asks for the wallet's password:
+
+   ```sh
+   bun run ramp
+   ```
+
+   To spend more, raise the budget: `RAMP_BUDGET=5 bun run ramp`.
+
+See [Ramp](#ramp) for what it prints.
 
 ## What it measures
 
@@ -64,7 +104,9 @@ bun run new-wallet
 
 It generates a key in memory and asks for a password (at least 8 characters). It then writes
 `wallets/sender.json`, a standard Ethereum keystore that git ignores, and prints the address.
-Fund that address with tGLM. `.env` points at the wallet with `ARKIV_KEYSTORE`.
+Fund that address with tGLM. `.env` points at the wallet with `ARKIV_KEYSTORE`. `bun run balance`
+shows its balance, without asking for the password, as a keystore holds its address in the clear;
+`bun run balance wallets/block-01.json` shows another wallet's.
 
 Every run asks for the password on the terminal and keeps the key in memory only. Runs therefore
 need an interactive terminal.
@@ -176,6 +218,34 @@ SECTIONS=fill FILL_BLOCKS=50 FILL_BUDGET=10 bun run throughput
 The expected base fee uses Ethereum's rule: a target of half the block gas limit, and a change of
 at most 1/8 per block. If rabdi uses another rule, set `BASE_FEE_ELASTICITY` and
 `BASE_FEE_DENOMINATOR`; the `change` column shows what the chain actually did either way.
+
+## Ramp
+
+`experiment/ramp.ts` shows how many creates fit in a block at the chain's current block gas
+limit. Run it again after the limit changes to compare.
+
+```sh
+bun run ramp
+```
+
+Each transaction is a batch of 10 creates. Each entity has 5 attributes: category, priority and
+author, all indexed; a title; and a 300-byte payload. The run sends 1 batch per block for 3
+blocks, then 2, then 3 and so on. Batches sent together don't all land in the same block, so
+below capacity some blocks take more than the rate and some fewer. Once the rate passes capacity,
+a backlog builds up in the pool and every block fills from it. The run stops after 2 blocks in a
+row are at least 90% full.
+
+A line per block shows its number, transactions, entities, size in bytes, gas limit, gas used, gas
+per entity, how full it is, the base fee, and the fees of all its transactions in GLM and USD. The
+counts include every sender's transactions, not only the run's. At the end the run prints the average
+number of entities over the full blocks.
+
+One sender may have only 16 transactions pending, fewer than it takes to fill a block. So the run
+derives extra senders from the `ARKIV_KEYSTORE` key, in memory only. It shares out twice
+`RAMP_BUDGET` (default 1 GLM) among them: the node accepts a transaction only if its sender can
+pay for it and all its pending ones at their highest fee. The run stops once the senders have
+spent `RAMP_BUDGET`, and at the end they pay back what they have left. `.env.example` lists the
+other settings.
 
 ## Things to know
 

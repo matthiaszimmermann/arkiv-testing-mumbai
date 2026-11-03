@@ -7,8 +7,10 @@
   "description": "Measures what Arkiv entity operations cost on a live chain",
   "scripts": {
     "new-wallet": "bun experiment/new-wallet.ts",
+    "balance": "bun experiment/balance.ts",
     "tokenomics": "bun experiment/tokenomics.ts",
     "throughput": "bun experiment/throughput.ts",
+    "ramp": "bun experiment/ramp.ts",
     "typecheck": "bunx tsc --noEmit"
   },
   "dependencies": {
